@@ -1,0 +1,4 @@
+chromadb
+voyageai
+tiktoken
+python-dotenv
