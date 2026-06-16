@@ -2,3 +2,4 @@ chromadb
 voyageai
 tiktoken
 python-dotenv
+anthropic

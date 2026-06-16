@@ -17,6 +17,10 @@ COLLECTION_NAME = "support_faq"
 EMBED_MODEL = "voyage-3-lite"
 
 
+def project_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
 def chunk_tokens(tokens: list[int], chunk_size: int, overlap: int) -> Iterable[list[int]]:
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
@@ -79,6 +83,48 @@ def embed_texts(client: voyageai.Client, texts: list[str]) -> list[list[float]]:
     return embeddings
 
 
+def distance_to_similarity(distance: float) -> float:
+    if distance <= 0:
+        return 1.0
+    return 1.0 / (1.0 + distance)
+
+
+def query_knowledge_base(question: str, top_k: int = 3) -> list[dict[str, object]]:
+    load_dotenv()
+
+    api_key = os.getenv("VOYAGE_API_KEY")
+    if not api_key:
+        raise RuntimeError("VOYAGE_API_KEY is not set")
+
+    client = voyageai.Client(api_key=api_key)
+    embedding = client.embed([question], model=EMBED_MODEL).embeddings[0]
+
+    chroma_client = chromadb.PersistentClient(path=str(project_root() / "chroma_db"))
+    collection = chroma_client.get_collection(name=COLLECTION_NAME)
+
+    result = collection.query(
+        query_embeddings=[embedding],
+        n_results=top_k,
+        include=["documents", "distances", "metadatas"],
+    )
+
+    documents = result.get("documents", [[]])[0]
+    distances = result.get("distances", [[]])[0]
+    metadatas = result.get("metadatas", [[]])[0]
+
+    matches: list[dict[str, object]] = []
+    for document, distance, metadata in zip(documents, distances, metadatas):
+        matches.append(
+            {
+                "text": document,
+                "distance": distance,
+                "similarity": distance_to_similarity(distance),
+                "metadata": metadata,
+            }
+        )
+    return matches
+
+
 def main() -> None:
     load_dotenv()
 
@@ -86,9 +132,9 @@ def main() -> None:
     if not api_key:
         raise RuntimeError("VOYAGE_API_KEY is not set")
 
-    project_root = Path(__file__).resolve().parent.parent
-    raw_dir = project_root / "data" / "raw"
-    chroma_dir = project_root / "chroma_db"
+    root = project_root()
+    raw_dir = root / "data" / "raw"
+    chroma_dir = root / "chroma_db"
 
     encoding = tiktoken.get_encoding("cl100k_base")
     documents = load_documents(raw_dir)
