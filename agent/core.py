@@ -20,9 +20,16 @@ DEFAULT_RATE_LIMIT_RETRY_SECONDS = 35
 
 SYSTEM_PROMPT = (
     "You are a customer support agent. "
+    "You may only answer customer support questions related to orders, refunds, shipping, accounts, billing, "
+    "and service policies. If the user asks about anything outside customer support, politely refuse and redirect "
+    "them back to support topics you can help with. "
     "For general support questions, call search_knowledge_base first before answering. "
+    "If search_knowledge_base returns empty or irrelevant matches, do not invent an answer; immediately call "
+    "escalate_to_human with reason 'no relevant info found'. "
     "For specific order questions with an order ID, call check_order_status. "
     "If the user explicitly asks for a human, or if you are not confident after tools, call escalate_to_human. "
+    "If the user seems frustrated, uses harsh language, says they are not satisfied, or complains after two "
+    "interactions, proactively offer to escalate_to_human. "
     "Use create_ticket when the issue needs formal follow-up tracking. "
     "Never invent policy, order, or ticket details."
 )
@@ -88,6 +95,17 @@ def _retry_delay_seconds(exc: ResourceExhausted) -> int:
     return DEFAULT_RATE_LIMIT_RETRY_SECONDS
 
 
+def _response_text(parts: Any) -> str:
+    return "".join(getattr(part, "text", "") for part in parts if getattr(part, "text", "")).strip()
+
+
+def _kb_has_relevant_matches(tool_result: Any) -> bool:
+    if not isinstance(tool_result, dict):
+        return False
+    matches = tool_result.get("matches")
+    return isinstance(matches, list) and len(matches) > 0
+
+
 class SupportAgent:
     def __init__(self, api_key: str | None = None, model_name: str = MODEL_NAME) -> None:
         load_dotenv()
@@ -102,7 +120,7 @@ class SupportAgent:
             system_instruction=SYSTEM_PROMPT,
         )
 
-    def chat(self, user_message: str, conversation_history: list[dict[str, Any]]) -> str:
+    def chat(self, user_message: str, conversation_history: list[Any]) -> str:
         chat = self.model.start_chat(history=conversation_history)
         next_message: str | genai.protos.Part = user_message
         rate_limit_retries = 0
@@ -132,7 +150,10 @@ class SupportAgent:
                 None,
             )
             if function_call is None:
-                return response.text
+                text = _response_text(parts)
+                conversation_history.clear()
+                conversation_history.extend(chat.history)
+                return text or "Maaf, saya tidak bisa memberikan jawaban yang aman saat ini."
 
             tool_name = function_call.name
             tool_args = dict(function_call.args)
@@ -147,6 +168,25 @@ class SupportAgent:
                     tool_result = handler(**tool_args)
                 except Exception as exc:
                     tool_result = {"error": str(exc)}
+
+            if tool_name == "search_knowledge_base" and not _kb_has_relevant_matches(tool_result):
+                escalate_args = {"reason": "no relevant info found"}
+                print(
+                    "FUNCTION_CALL "
+                    f"name=escalate_to_human args={json.dumps(escalate_args, ensure_ascii=False)}"
+                )
+                TOOL_MAP["escalate_to_human"](**escalate_args)
+                conversation_history.clear()
+                conversation_history.extend(chat.history)
+                return (
+                    "Maaf, saya belum menemukan informasi yang relevan di knowledge base. "
+                    "Saya akan eskalasikan percakapan ini ke agent manusia."
+                )
+
+            if tool_name == "escalate_to_human":
+                conversation_history.clear()
+                conversation_history.extend(chat.history)
+                return "Saya akan eskalasikan percakapan ini ke agent manusia agar bisa ditangani lebih lanjut."
 
             next_message = genai.protos.Part(
                 function_response=genai.protos.FunctionResponse(
