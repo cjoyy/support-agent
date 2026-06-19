@@ -3,3 +3,5 @@ voyageai
 tiktoken
 python-dotenv
 google-generativeai
+fastapi
+uvicorn
