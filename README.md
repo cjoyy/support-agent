@@ -1,3 +1,13 @@
+---
+title: Support Agent
+emoji: 🤖
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Support Agent
 
 Customer support agent berbasis FastAPI yang memakai Gemini function calling, ChromaDB retrieval, session memory, guardrails, structured tool logging, dan eval golden set.
