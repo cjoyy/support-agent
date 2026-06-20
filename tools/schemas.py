@@ -7,7 +7,8 @@ schemas = [
         "description": (
             "Gunakan untuk pertanyaan support umum yang kemungkinan jawabannya ada di FAQ/knowledge base, "
             "seperti refund, shipping, login, akun, billing, atau kebijakan layanan. Jangan dipakai untuk "
-            "status order spesifik atau saat user jelas meminta manusia."
+            "status order spesifik, pembuatan tiket, atau saat user jelas meminta manusia. Tool ini untuk "
+            "menjawab pertanyaan informasi umum, bukan untuk mencatat kasus baru."
         ),
         "input_schema": {
             "type": "object",
@@ -25,7 +26,8 @@ schemas = [
         "name": "check_order_status",
         "description": (
             "Gunakan hanya jika user menanyakan status order yang spesifik dan menyebutkan order ID. "
-            "Jangan dipakai untuk pertanyaan kebijakan atau FAQ umum karena tool ini hanya untuk lookup order."
+            "Order ID biasanya berbentuk seperti ORD123. Jangan dipakai untuk pertanyaan kebijakan, refund umum, "
+            "shipping umum, atau FAQ umum karena tool ini hanya untuk lookup order."
         ),
         "input_schema": {
             "type": "object",
@@ -42,9 +44,9 @@ schemas = [
     {
         "name": "create_ticket",
         "description": (
-            "Gunakan ketika masalah perlu ditracking sebagai tiket, misalnya setelah knowledge base tidak cukup, "
-            "ada follow-up manual yang diperlukan, atau issue butuh ditindaklanjuti tim support. Jangan dipakai "
-            "untuk pertanyaan yang bisa diselesaikan langsung dengan knowledge base atau lookup order."
+            "Gunakan ketika user meminta dibuatkan tiket, nomor tiket, pencatatan komplain, atau follow-up formal. "
+            "Juga gunakan jika masalah butuh tracking oleh tim support. Jangan dipakai untuk pertanyaan FAQ umum, "
+            "lookup status order sederhana, atau permintaan bicara langsung dengan manusia."
         ),
         "input_schema": {
             "type": "object",
@@ -66,9 +68,9 @@ schemas = [
     {
         "name": "escalate_to_human",
         "description": (
-            "Gunakan jika user secara eksplisit meminta human, jika jawaban tidak yakin, atau jika hasil pencarian "
-            "knowledge base maupun order lookup tidak cukup untuk menjawab dengan aman. Tool ini untuk handoff ke "
-            "agent manusia, bukan untuk menjawab masalah sendiri."
+            "Gunakan jika user secara eksplisit meminta manusia/human agent/agent support asli, jika user frustrasi "
+            "atau komplain berulang, jika jawaban tidak yakin, atau jika hasil knowledge base/order lookup tidak "
+            "cukup untuk menjawab dengan aman. Tool ini untuk handoff ke agent manusia, bukan untuk membuat tiket."
         ),
         "input_schema": {
             "type": "object",

@@ -1,0 +1,128 @@
+[
+  {
+    "id": 1,
+    "input": "Bagaimana cara refund?",
+    "expected_tool": "search_knowledge_base",
+    "category": "faq"
+  },
+  {
+    "id": 2,
+    "input": "Berapa lama pengiriman standar biasanya sampai?",
+    "expected_tool": "search_knowledge_base",
+    "category": "faq"
+  },
+  {
+    "id": 3,
+    "input": "Saya lupa password akun, harus bagaimana?",
+    "expected_tool": "search_knowledge_base",
+    "category": "faq"
+  },
+  {
+    "id": 4,
+    "input": "Apakah biaya shipping bisa direfund?",
+    "expected_tool": "search_knowledge_base",
+    "category": "faq"
+  },
+  {
+    "id": 5,
+    "input": "Bagaimana cara melacak paket saya?",
+    "expected_tool": "search_knowledge_base",
+    "category": "faq"
+  },
+  {
+    "id": 6,
+    "input": "Status order ORD123 sekarang apa?",
+    "expected_tool": "check_order_status",
+    "category": "order_status"
+  },
+  {
+    "id": 7,
+    "input": "Tolong cek pesanan ORD124 saya.",
+    "expected_tool": "check_order_status",
+    "category": "order_status"
+  },
+  {
+    "id": 8,
+    "input": "Order ORD125 sudah sampai atau belum?",
+    "expected_tool": "check_order_status",
+    "category": "order_status"
+  },
+  {
+    "id": 9,
+    "input": "Bisa bantu lihat status order ORD999?",
+    "expected_tool": "check_order_status",
+    "category": "order_status"
+  },
+  {
+    "id": 10,
+    "input": "Buatkan tiket untuk masalah paket saya rusak saat diterima.",
+    "expected_tool": "create_ticket",
+    "category": "ticket_creation"
+  },
+  {
+    "id": 11,
+    "input": "Saya perlu nomor tiket untuk follow up refund yang belum masuk.",
+    "expected_tool": "create_ticket",
+    "category": "ticket_creation"
+  },
+  {
+    "id": 12,
+    "input": "Tolong catat komplain saya sebagai tiket prioritas tinggi.",
+    "expected_tool": "create_ticket",
+    "category": "ticket_creation"
+  },
+  {
+    "id": 13,
+    "input": "Saya mau bicara dengan manusia.",
+    "expected_tool": "escalate_to_human",
+    "category": "escalation"
+  },
+  {
+    "id": 14,
+    "input": "Tolong sambungkan saya ke agent support asli.",
+    "expected_tool": "escalate_to_human",
+    "category": "escalation"
+  },
+  {
+    "id": 15,
+    "input": "Saya tidak puas dan mau komplain ke human agent sekarang.",
+    "expected_tool": "escalate_to_human",
+    "category": "escalation"
+  },
+  {
+    "id": 16,
+    "input": "Tolong jelaskan cara bikin nasi goreng.",
+    "expected_tool": null,
+    "category": "out_of_scope"
+  },
+  {
+    "id": 17,
+    "input": "Siapa presiden Amerika Serikat sekarang?",
+    "expected_tool": null,
+    "category": "out_of_scope"
+  },
+  {
+    "id": 18,
+    "input": "Buatkan kode Python untuk scraping website.",
+    "expected_tool": null,
+    "category": "out_of_scope"
+  },
+  {
+    "id": 19,
+    "input": [
+      "Halo, saya mau tanya order.",
+      "Nomor order saya ORD123, statusnya apa?"
+    ],
+    "expected_tool": "check_order_status",
+    "category": "edge_case_multi_turn"
+  },
+  {
+    "id": 20,
+    "input": [
+      "Refund saya belum masuk.",
+      "Saya tidak puas, ini komplain kedua saya."
+    ],
+    "expected_tool": "escalate_to_human",
+    "category": "edge_case_multi_turn"
+  }
+]
