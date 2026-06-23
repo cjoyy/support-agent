@@ -6,8 +6,8 @@ import re
 import time
 from typing import Any
 
-import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
+from google import genai
+from google.genai.errors import APIError
 from dotenv import load_dotenv
 
 from tools.handlers import TOOL_MAP
@@ -36,16 +36,16 @@ SYSTEM_PROMPT = (
 
 
 TYPE_MAP = {
-    "object": genai.protos.Type.OBJECT,
-    "string": genai.protos.Type.STRING,
-    "number": genai.protos.Type.NUMBER,
-    "integer": genai.protos.Type.INTEGER,
-    "boolean": genai.protos.Type.BOOLEAN,
-    "array": genai.protos.Type.ARRAY,
+    "object": genai.types.Type.OBJECT,
+    "string": genai.types.Type.STRING,
+    "number": genai.types.Type.NUMBER,
+    "integer": genai.types.Type.INTEGER,
+    "boolean": genai.types.Type.BOOLEAN,
+    "array": genai.types.Type.ARRAY,
 }
 
 
-def _to_gemini_schema(schema: dict[str, Any]) -> genai.protos.Schema:
+def _to_gemini_schema(schema: dict[str, Any]) -> genai.types.Schema:
     schema_type = TYPE_MAP[schema["type"]]
     kwargs: dict[str, Any] = {"type": schema_type}
 
@@ -67,23 +67,23 @@ def _to_gemini_schema(schema: dict[str, Any]) -> genai.protos.Schema:
     if items := schema.get("items"):
         kwargs["items"] = _to_gemini_schema(items)
 
-    return genai.protos.Schema(**kwargs)
+    return genai.types.Schema(**kwargs)
 
 
-def _to_function_declaration(schema: dict[str, Any]) -> genai.protos.FunctionDeclaration:
-    return genai.protos.FunctionDeclaration(
+def _to_function_declaration(schema: dict[str, Any]) -> genai.types.FunctionDeclaration:
+    return genai.types.FunctionDeclaration(
         name=schema["name"],
         description=schema["description"],
         parameters=_to_gemini_schema(schema["input_schema"]),
     )
 
 
-tool_schema = genai.protos.Tool(
-    function_declarations=[_to_function_declaration(schema) for schema in schemas]
+tool_schema = genai.types.Tool(
+    functionDeclarations=[_to_function_declaration(schema) for schema in schemas]
 )
 
 
-def _retry_delay_seconds(exc: ResourceExhausted) -> int:
+def _retry_delay_seconds(exc: Exception) -> int:
     match = re.search(r"retry_delay\s*{\s*seconds:\s*(\d+)", str(exc))
     if match:
         return int(match.group(1)) + 1
@@ -93,6 +93,15 @@ def _retry_delay_seconds(exc: ResourceExhausted) -> int:
         return int(float(match.group(1))) + 1
 
     return DEFAULT_RATE_LIMIT_RETRY_SECONDS
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if status_code == 429:
+        return True
+
+    message = str(exc).lower()
+    return "quota" in message or "rate limit" in message or "resourceexhausted" in message
 
 
 def _response_text(parts: Any) -> str:
@@ -106,6 +115,24 @@ def _kb_has_relevant_matches(tool_result: Any) -> bool:
     return isinstance(matches, list) and len(matches) > 0
 
 
+def _user_content(text: str) -> genai.types.Content:
+    return genai.types.Content(role="user", parts=[genai.types.Part(text=text)])
+
+
+def _function_response_content(tool_name: str, tool_result: Any) -> genai.types.Content:
+    return genai.types.Content(
+        role="user",
+        parts=[
+            genai.types.Part(
+                functionResponse=genai.types.FunctionResponse(
+                    name=tool_name,
+                    response={"result": tool_result},
+                )
+            )
+        ],
+    )
+
+
 class SupportAgent:
     def __init__(self, api_key: str | None = None, model_name: str = MODEL_NAME) -> None:
         load_dotenv()
@@ -113,23 +140,28 @@ class SupportAgent:
         if not resolved_key:
             raise RuntimeError("GEMINI_API_KEY is not set")
 
-        genai.configure(api_key=resolved_key)
-        self.model = genai.GenerativeModel(
-            model_name,
+        self.client = genai.Client(api_key=resolved_key)
+        self.model_name = model_name
+        self.config = genai.types.GenerateContentConfig(
             tools=[tool_schema],
-            system_instruction=SYSTEM_PROMPT,
+            systemInstruction=SYSTEM_PROMPT,
         )
 
     def chat(self, user_message: str, conversation_history: list[Any]) -> str:
-        chat = self.model.start_chat(history=conversation_history)
-        next_message: str | genai.protos.Part = user_message
+        contents = list(conversation_history)
+        next_message = _user_content(user_message)
         rate_limit_retries = 0
 
         while True:
+            request_contents = contents + [next_message]
             try:
-                response = chat.send_message(next_message)
-            except ResourceExhausted as exc:
-                if rate_limit_retries >= MAX_RATE_LIMIT_RETRIES:
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=request_contents,
+                    config=self.config,
+                )
+            except APIError as exc:
+                if not _is_rate_limit_error(exc) or rate_limit_retries >= MAX_RATE_LIMIT_RETRIES:
                     raise
 
                 rate_limit_retries += 1
@@ -143,7 +175,9 @@ class SupportAgent:
                 continue
 
             rate_limit_retries = 0
-            parts = response.candidates[0].content.parts
+            response_content = response.candidates[0].content
+            contents = request_contents + [response_content]
+            parts = response_content.parts or []
 
             function_call = next(
                 (part.function_call for part in parts if part.function_call),
@@ -152,7 +186,7 @@ class SupportAgent:
             if function_call is None:
                 text = _response_text(parts)
                 conversation_history.clear()
-                conversation_history.extend(chat.history)
+                conversation_history.extend(contents)
                 return text or "Maaf, saya tidak bisa memberikan jawaban yang aman saat ini."
 
             tool_name = function_call.name
@@ -177,7 +211,7 @@ class SupportAgent:
                 )
                 TOOL_MAP["escalate_to_human"](**escalate_args)
                 conversation_history.clear()
-                conversation_history.extend(chat.history)
+                conversation_history.extend(contents)
                 return (
                     "Maaf, saya belum menemukan informasi yang relevan di knowledge base. "
                     "Saya akan eskalasikan percakapan ini ke agent manusia."
@@ -185,12 +219,7 @@ class SupportAgent:
 
             if tool_name == "escalate_to_human":
                 conversation_history.clear()
-                conversation_history.extend(chat.history)
+                conversation_history.extend(contents)
                 return "Saya akan eskalasikan percakapan ini ke agent manusia agar bisa ditangani lebih lanjut."
 
-            next_message = genai.protos.Part(
-                function_response=genai.protos.FunctionResponse(
-                    name=tool_name,
-                    response={"result": tool_result},
-                )
-            )
+            next_message = _function_response_content(tool_name, tool_result)

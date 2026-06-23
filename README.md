@@ -40,7 +40,7 @@ Flow aplikasi:
 ## Tech Stack
 
 - FastAPI: dipilih untuk API sederhana, typed request/response via Pydantic, dan Swagger UI otomatis. Aplikasi agent core tetap ringan tanpa framework agent besar agar flow function calling mudah di-debug.
-- Google Gemini (`google-generativeai`): dipakai karena mendukung function calling, cepat untuk support flow, dan punya free tier yang cocok untuk prototype.
+- Google Gemini (`google-genai`): dipakai karena mendukung function calling, cepat untuk support flow, dan punya free tier yang cocok untuk prototype.
 - ChromaDB: vector database lokal yang praktis untuk RAG kecil/menengah tanpa perlu managed service.
 - VoyageAI embeddings: dipakai untuk embedding knowledge base dengan kualitas retrieval yang baik.
 - In-memory session store: cukup untuk prototype dan local demo; lebih sederhana daripada Redis/database.

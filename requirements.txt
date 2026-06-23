@@ -2,6 +2,6 @@ chromadb
 voyageai
 tiktoken
 python-dotenv
-google-generativeai
+google-genai
 fastapi
 uvicorn
