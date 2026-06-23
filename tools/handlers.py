@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import os
 import time
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from dotenv import load_dotenv
+from google import genai
+from pydantic import BaseModel, Field, ValidationError
 
 from data.ingest import query_knowledge_base as ingest_query_knowledge_base
 
@@ -19,6 +22,27 @@ ORDER_FIXTURES = {
     "ORD125": {"status": "delivered", "eta": "2026-06-22"},
 }
 MIN_KB_SIMILARITY = 0.45
+CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
+CURRENT_REQUEST_ID: ContextVar[str | None] = ContextVar("request_id", default=None)
+
+
+class CheckOrderStatusInput(BaseModel):
+    order_id: str = Field(pattern=r"^ORD\d+$")
+
+
+class CreateTicketInput(BaseModel):
+    issue: str = Field(min_length=5)
+    priority: Literal["low", "medium", "high"]
+
+
+class EscalateInput(BaseModel):
+    reason: str = Field(min_length=5)
+
+
+class TicketSeverityClassification(BaseModel):
+    severity: Literal["low", "medium", "high"]
+    category: str
+    reasoning: str
 
 
 def project_root() -> Path:
@@ -31,6 +55,41 @@ def tickets_path() -> Path:
 
 def agent_log_path() -> Path:
     return project_root() / "logs" / "agent_log.jsonl"
+
+
+def usage_log_path() -> Path:
+    return project_root() / "logs" / "usage_log.jsonl"
+
+
+def set_request_id(request_id: str | None) -> object:
+    return CURRENT_REQUEST_ID.set(request_id)
+
+
+def reset_request_id(token: object) -> None:
+    CURRENT_REQUEST_ID.reset(token)
+
+
+def current_request_id() -> str | None:
+    return CURRENT_REQUEST_ID.get()
+
+
+def append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as log_file:
+        log_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+
+def print_and_log_agent_event(record: dict[str, Any]) -> None:
+    print(json.dumps(record, ensure_ascii=False, default=str))
+    append_jsonl(agent_log_path(), record)
+
+
+def validation_error_response(exc: ValidationError) -> dict[str, object]:
+    messages = [
+        f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+        for error in exc.errors()
+    ]
+    return {"error": f"invalid input: {'; '.join(messages)}"}
 
 
 def log_tool_call(func: Callable[..., dict[str, object]]) -> Callable[..., dict[str, object]]:
@@ -52,6 +111,8 @@ def log_tool_call(func: Callable[..., dict[str, object]]) -> Callable[..., dict[
         finally:
             duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
             log_record = {
+                "event": "tool_call",
+                "request_id": current_request_id(),
                 "timestamp": timestamp,
                 "tool": func.__name__,
                 "params": params,
@@ -61,14 +122,43 @@ def log_tool_call(func: Callable[..., dict[str, object]]) -> Callable[..., dict[
             if error is not None:
                 log_record["error"] = error
 
-            print(json.dumps(log_record, ensure_ascii=False, default=str))
-
-            path = agent_log_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as log_file:
-                log_file.write(json.dumps(log_record, ensure_ascii=False, default=str) + "\n")
+            print_and_log_agent_event(log_record)
 
     return wrapper
+
+
+def classify_ticket_severity(issue_text: str) -> dict[str, str]:
+    load_dotenv()
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return {
+            "severity": "medium",
+            "category": "unclassified",
+            "reasoning": "classification unavailable: GEMINI_API_KEY is not set",
+        }
+
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=CLASSIFIER_MODEL,
+        contents=(
+            "Classify this customer support ticket. "
+            "Return only the structured JSON requested by the schema.\n\n"
+            f"Issue: {issue_text}"
+        ),
+        config=genai.types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=TicketSeverityClassification,
+        ),
+    )
+
+    parsed = getattr(response, "parsed", None)
+    if isinstance(parsed, TicketSeverityClassification):
+        return parsed.model_dump()
+
+    if isinstance(parsed, dict):
+        return TicketSeverityClassification.model_validate(parsed).model_dump()
+
+    return TicketSeverityClassification.model_validate_json(response.text).model_dump()
 
 
 @log_tool_call
@@ -85,6 +175,12 @@ def search_knowledge_base(query: str) -> dict[str, object]:
 @log_tool_call
 def check_order_status(order_id: str) -> dict[str, object]:
     normalized_order_id = order_id.strip().upper()
+    try:
+        validated = CheckOrderStatusInput(order_id=normalized_order_id)
+    except ValidationError as exc:
+        return validation_error_response(exc)
+
+    normalized_order_id = validated.order_id
     record = ORDER_FIXTURES.get(normalized_order_id)
 
     if record is None:
@@ -95,9 +191,19 @@ def check_order_status(order_id: str) -> dict[str, object]:
 
 @log_tool_call
 def create_ticket(issue: str, priority: str) -> dict[str, object]:
-    priority = priority.lower().strip()
-    if priority not in {"low", "medium", "high"}:
-        raise ValueError("priority must be one of: low, medium, high")
+    try:
+        validated = CreateTicketInput(issue=issue.strip(), priority=priority.lower().strip())
+    except ValidationError as exc:
+        return validation_error_response(exc)
+
+    try:
+        classification = classify_ticket_severity(validated.issue)
+    except Exception as exc:
+        classification = {
+            "severity": validated.priority,
+            "category": "unclassified",
+            "reasoning": f"classification unavailable: {exc}",
+        }
 
     path = tickets_path()
     if path.exists():
@@ -108,8 +214,11 @@ def create_ticket(issue: str, priority: str) -> dict[str, object]:
     next_id = max((ticket.get("id", 0) for ticket in tickets), default=0) + 1
     ticket = {
         "id": next_id,
-        "issue": issue,
-        "priority": priority,
+        "issue": validated.issue,
+        "priority": validated.priority,
+        "severity": classification["severity"],
+        "category": classification["category"],
+        "classification_reasoning": classification["reasoning"],
         "status": "open",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -120,8 +229,13 @@ def create_ticket(issue: str, priority: str) -> dict[str, object]:
 
 @log_tool_call
 def escalate_to_human(reason: str) -> dict[str, object]:
-    print(f"ESCALATED: {reason}")
-    return {"escalated": True, "reason": reason}
+    try:
+        validated = EscalateInput(reason=reason.strip())
+    except ValidationError as exc:
+        return validation_error_response(exc)
+
+    print(f"ESCALATED request_id={current_request_id()} reason={validated.reason}")
+    return {"escalated": True, "reason": validated.reason}
 
 
 TOOL_MAP = {
