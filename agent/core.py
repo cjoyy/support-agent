@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
-import re
 import time
 from datetime import datetime, timezone
 from typing import Any
 
-from google import genai
-from google.genai.errors import APIError
 from dotenv import load_dotenv
 
+from agent.providers import GeminiProvider, GroqProvider, LLMProvider, ProviderResponse, ToolCall
+from agent.resilience import CircuitBreaker, CircuitOpenError
 from tools.handlers import (
     TOOL_MAP,
     append_jsonl,
@@ -24,7 +22,6 @@ from tools.schemas import schemas
 
 MODEL_NAME = "gemini-2.5-flash-lite"
 MAX_RATE_LIMIT_RETRIES = 2
-DEFAULT_RATE_LIMIT_RETRY_SECONDS = 35
 INPUT_COST_PER_1M_TOKEN = 0.10
 OUTPUT_COST_PER_1M_TOKEN = 0.40
 
@@ -45,94 +42,11 @@ SYSTEM_PROMPT = (
 )
 
 
-TYPE_MAP = {
-    "object": genai.types.Type.OBJECT,
-    "string": genai.types.Type.STRING,
-    "number": genai.types.Type.NUMBER,
-    "integer": genai.types.Type.INTEGER,
-    "boolean": genai.types.Type.BOOLEAN,
-    "array": genai.types.Type.ARRAY,
-}
-
-
-def _to_gemini_schema(schema: dict[str, Any]) -> genai.types.Schema:
-    schema_type = TYPE_MAP[schema["type"]]
-    kwargs: dict[str, Any] = {"type": schema_type}
-
-    if description := schema.get("description"):
-        kwargs["description"] = description
-
-    if enum_values := schema.get("enum"):
-        kwargs["enum"] = enum_values
-
-    if properties := schema.get("properties"):
-        kwargs["properties"] = {
-            name: _to_gemini_schema(property_schema)
-            for name, property_schema in properties.items()
-        }
-
-    if required := schema.get("required"):
-        kwargs["required"] = required
-
-    if items := schema.get("items"):
-        kwargs["items"] = _to_gemini_schema(items)
-
-    return genai.types.Schema(**kwargs)
-
-
-def _to_function_declaration(schema: dict[str, Any]) -> genai.types.FunctionDeclaration:
-    return genai.types.FunctionDeclaration(
-        name=schema["name"],
-        description=schema["description"],
-        parameters=_to_gemini_schema(schema["input_schema"]),
-    )
-
-
-tool_schema = genai.types.Tool(
-    functionDeclarations=[_to_function_declaration(schema) for schema in schemas]
-)
-
-
-def _retry_delay_seconds(exc: Exception) -> int:
-    match = re.search(r"retry_delay\s*{\s*seconds:\s*(\d+)", str(exc))
-    if match:
-        return int(match.group(1)) + 1
-
-    match = re.search(r"Please retry in ([\d.]+)s", str(exc))
-    if match:
-        return int(float(match.group(1))) + 1
-
-    return DEFAULT_RATE_LIMIT_RETRY_SECONDS
-
-
-def _is_rate_limit_error(exc: Exception) -> bool:
-    status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-    if status_code == 429:
-        return True
-
-    message = str(exc).lower()
-    return "quota" in message or "rate limit" in message or "resourceexhausted" in message
-
-
-def _response_text(parts: Any) -> str:
-    return "".join(getattr(part, "text", "") for part in parts if getattr(part, "text", "")).strip()
-
-
 def _kb_has_relevant_matches(tool_result: Any) -> bool:
     if not isinstance(tool_result, dict):
         return False
     matches = tool_result.get("matches")
     return isinstance(matches, list) and len(matches) > 0
-
-
-def _usage_counts(response: Any) -> tuple[int, int]:
-    usage_metadata = getattr(response, "usage_metadata", None)
-    if usage_metadata is None:
-        return 0, 0
-
-    input_tokens = getattr(usage_metadata, "prompt_token_count", None) or 0
-    output_tokens = getattr(usage_metadata, "candidates_token_count", None) or 0
-    return int(input_tokens), int(output_tokens)
 
 
 def _estimated_cost_usd(input_tokens: int, output_tokens: int) -> float:
@@ -142,37 +56,68 @@ def _estimated_cost_usd(input_tokens: int, output_tokens: int) -> float:
     )
 
 
-def _user_content(text: str) -> genai.types.Content:
-    return genai.types.Content(role="user", parts=[genai.types.Part(text=text)])
-
-
-def _function_response_content(tool_name: str, tool_result: Any) -> genai.types.Content:
-    return genai.types.Content(
-        role="user",
-        parts=[
-            genai.types.Part(
-                functionResponse=genai.types.FunctionResponse(
-                    name=tool_name,
-                    response={"result": tool_result},
-                )
-            )
+def _assistant_tool_message(tool_calls: list[ToolCall]) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": tool_call.id or f"call_{index}",
+                "name": tool_call.name,
+                "args": tool_call.args,
+            }
+            for index, tool_call in enumerate(tool_calls)
         ],
-    )
+    }
+
+
+def _tool_result_message(tool_call: ToolCall, tool_result: Any) -> dict[str, Any]:
+    return {
+        "role": "tool",
+        "tool_call_id": tool_call.id or "call_0",
+        "name": tool_call.name,
+        "content": tool_result,
+    }
 
 
 class SupportAgent:
-    def __init__(self, api_key: str | None = None, model_name: str = MODEL_NAME) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model_name: str = MODEL_NAME,
+        primary_provider: LLMProvider | None = None,
+        fallback_provider: LLMProvider | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
+    ) -> None:
         load_dotenv()
-        resolved_key = api_key or os.getenv("GEMINI_API_KEY")
-        if not resolved_key:
-            raise RuntimeError("GEMINI_API_KEY is not set")
-
-        self.client = genai.Client(api_key=resolved_key)
-        self.model_name = model_name
-        self.config = genai.types.GenerateContentConfig(
-            tools=[tool_schema],
-            systemInstruction=SYSTEM_PROMPT,
+        self.primary_provider = primary_provider or GeminiProvider(
+            api_key=api_key,
+            model=model_name,
+            system_prompt=SYSTEM_PROMPT,
         )
+        self.fallback_provider = fallback_provider or GroqProvider(system_prompt=SYSTEM_PROMPT)
+        self.circuit_breaker = circuit_breaker or CircuitBreaker()
+
+    def _generate(self, messages: list[dict[str, Any]], request_id: str | None) -> ProviderResponse:
+        try:
+            return self.circuit_breaker.call(self.primary_provider.generate, messages, schemas)
+        except CircuitOpenError as exc:
+            reason = str(exc)
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+
+        print_and_log_agent_event(
+            {
+                "event": "fallback_used",
+                "request_id": request_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "primary_provider": self.primary_provider.name,
+                "fallback_provider": self.fallback_provider.name,
+                "reason": reason,
+                "circuit_state": self.circuit_breaker.state,
+            }
+        )
+        return self.fallback_provider.generate(messages, schemas)
 
     def chat(self, user_message: str, conversation_history: list[Any], request_id: str | None = None) -> str:
         request_token = set_request_id(request_id)
@@ -181,99 +126,66 @@ class SupportAgent:
         retrieval_time_ms = 0.0
         input_tokens_total = 0
         output_tokens_total = 0
-        contents = list(conversation_history)
-        next_message = _user_content(user_message)
-        rate_limit_retries = 0
+        messages = list(conversation_history)
+        messages.append({"role": "user", "content": user_message})
 
         try:
             while True:
-                request_contents = contents + [next_message]
-                try:
-                    llm_started_at = time.perf_counter()
-                    response = self.client.models.generate_content(
-                        model=self.model_name,
-                        contents=request_contents,
-                        config=self.config,
-                    )
-                    llm_time_ms += (time.perf_counter() - llm_started_at) * 1000
-                except APIError as exc:
-                    llm_time_ms += (time.perf_counter() - llm_started_at) * 1000
-                    if not _is_rate_limit_error(exc) or rate_limit_retries >= MAX_RATE_LIMIT_RETRIES:
-                        raise
+                llm_started_at = time.perf_counter()
+                response = self._generate(messages, request_id)
+                llm_time_ms += (time.perf_counter() - llm_started_at) * 1000
+                input_tokens_total += response.input_tokens
+                output_tokens_total += response.output_tokens
 
-                    rate_limit_retries += 1
-                    delay_seconds = _retry_delay_seconds(exc)
-                    print(
-                        "RATE_LIMIT_RETRY "
-                        f"request_id={request_id} "
-                        f"attempt={rate_limit_retries}/{MAX_RATE_LIMIT_RETRIES} "
-                        f"sleep_seconds={delay_seconds}"
-                    )
-                    time.sleep(delay_seconds)
-                    continue
-
-                input_tokens, output_tokens = _usage_counts(response)
-                input_tokens_total += input_tokens
-                output_tokens_total += output_tokens
-
-                rate_limit_retries = 0
-                response_content = response.candidates[0].content
-                contents = request_contents + [response_content]
-                parts = response_content.parts or []
-
-                function_call = next(
-                    (part.function_call for part in parts if part.function_call),
-                    None,
-                )
-                if function_call is None:
-                    text = _response_text(parts)
+                if not response.tool_calls:
+                    messages.append({"role": "assistant", "content": response.text})
                     conversation_history.clear()
-                    conversation_history.extend(contents)
-                    return text or "Maaf, saya tidak bisa memberikan jawaban yang aman saat ini."
+                    conversation_history.extend(messages)
+                    return response.text or "Maaf, saya tidak bisa memberikan jawaban yang aman saat ini."
 
-                tool_name = function_call.name
-                tool_args = dict(function_call.args)
-                print(
-                    "FUNCTION_CALL "
-                    f"request_id={request_id} "
-                    f"name={tool_name} args={json.dumps(tool_args, ensure_ascii=False)}"
-                )
+                messages.append(_assistant_tool_message(response.tool_calls))
 
-                handler = TOOL_MAP.get(tool_name)
-                if handler is None:
-                    tool_result: Any = {"error": f"Unknown tool: {tool_name}"}
-                else:
-                    try:
-                        tool_started_at = time.perf_counter()
-                        tool_result = handler(**tool_args)
-                        if tool_name == "search_knowledge_base":
-                            retrieval_time_ms += (time.perf_counter() - tool_started_at) * 1000
-                    except Exception as exc:
-                        if tool_name == "search_knowledge_base":
-                            retrieval_time_ms += (time.perf_counter() - tool_started_at) * 1000
-                        tool_result = {"error": str(exc)}
-
-                if tool_name == "search_knowledge_base" and not _kb_has_relevant_matches(tool_result):
-                    escalate_args = {"reason": "no relevant info found"}
+                for tool_call in response.tool_calls:
                     print(
                         "FUNCTION_CALL "
                         f"request_id={request_id} "
-                        f"name=escalate_to_human args={json.dumps(escalate_args, ensure_ascii=False)}"
-                    )
-                    TOOL_MAP["escalate_to_human"](**escalate_args)
-                    conversation_history.clear()
-                    conversation_history.extend(contents)
-                    return (
-                        "Maaf, saya belum menemukan informasi yang relevan di knowledge base. "
-                        "Saya akan eskalasikan percakapan ini ke agent manusia."
+                        f"name={tool_call.name} args={json.dumps(tool_call.args, ensure_ascii=False)}"
                     )
 
-                if tool_name == "escalate_to_human":
-                    conversation_history.clear()
-                    conversation_history.extend(contents)
-                    return "Saya akan eskalasikan percakapan ini ke agent manusia agar bisa ditangani lebih lanjut."
+                    handler = TOOL_MAP.get(tool_call.name)
+                    if handler is None:
+                        tool_result: Any = {"error": f"Unknown tool: {tool_call.name}"}
+                    else:
+                        tool_started_at = time.perf_counter()
+                        try:
+                            tool_result = handler(**tool_call.args)
+                        except Exception as exc:
+                            tool_result = {"error": str(exc)}
+                        finally:
+                            if tool_call.name == "search_knowledge_base":
+                                retrieval_time_ms += (time.perf_counter() - tool_started_at) * 1000
 
-                next_message = _function_response_content(tool_name, tool_result)
+                    if tool_call.name == "search_knowledge_base" and not _kb_has_relevant_matches(tool_result):
+                        escalate_args = {"reason": "no relevant info found"}
+                        print(
+                            "FUNCTION_CALL "
+                            f"request_id={request_id} "
+                            f"name=escalate_to_human args={json.dumps(escalate_args, ensure_ascii=False)}"
+                        )
+                        TOOL_MAP["escalate_to_human"](**escalate_args)
+                        conversation_history.clear()
+                        conversation_history.extend(messages)
+                        return (
+                            "Maaf, saya belum menemukan informasi yang relevan di knowledge base. "
+                            "Saya akan eskalasikan percakapan ini ke agent manusia."
+                        )
+
+                    if tool_call.name == "escalate_to_human":
+                        conversation_history.clear()
+                        conversation_history.extend(messages)
+                        return "Saya akan eskalasikan percakapan ini ke agent manusia agar bisa ditangani lebih lanjut."
+
+                    messages.append(_tool_result_message(tool_call, tool_result))
         finally:
             total_time_ms = (time.perf_counter() - total_started_at) * 1000
             timestamp = datetime.now(timezone.utc).isoformat()
