@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -16,6 +18,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     session_id: str
+    request_id: str
 
 
 app = FastAPI(title="Support Agent API")
@@ -38,6 +41,7 @@ def health() -> dict[str, str]:
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
+    request_id = str(uuid4())
     history = session_manager.get_history(request.session_id)
-    response = agent.chat(request.message, history)
-    return ChatResponse(response=response, session_id=request.session_id)
+    response = agent.chat(request.message, history, request_id=request_id)
+    return ChatResponse(response=response, session_id=request.session_id, request_id=request_id)

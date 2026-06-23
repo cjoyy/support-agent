@@ -4,19 +4,29 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from google import genai
 from google.genai.errors import APIError
 from dotenv import load_dotenv
 
-from tools.handlers import TOOL_MAP
+from tools.handlers import (
+    TOOL_MAP,
+    append_jsonl,
+    print_and_log_agent_event,
+    reset_request_id,
+    set_request_id,
+    usage_log_path,
+)
 from tools.schemas import schemas
 
 
 MODEL_NAME = "gemini-2.5-flash-lite"
 MAX_RATE_LIMIT_RETRIES = 2
 DEFAULT_RATE_LIMIT_RETRY_SECONDS = 35
+INPUT_COST_PER_1M_TOKEN = 0.10
+OUTPUT_COST_PER_1M_TOKEN = 0.40
 
 SYSTEM_PROMPT = (
     "You are a customer support agent. "
@@ -115,6 +125,23 @@ def _kb_has_relevant_matches(tool_result: Any) -> bool:
     return isinstance(matches, list) and len(matches) > 0
 
 
+def _usage_counts(response: Any) -> tuple[int, int]:
+    usage_metadata = getattr(response, "usage_metadata", None)
+    if usage_metadata is None:
+        return 0, 0
+
+    input_tokens = getattr(usage_metadata, "prompt_token_count", None) or 0
+    output_tokens = getattr(usage_metadata, "candidates_token_count", None) or 0
+    return int(input_tokens), int(output_tokens)
+
+
+def _estimated_cost_usd(input_tokens: int, output_tokens: int) -> float:
+    return (
+        (input_tokens / 1_000_000) * INPUT_COST_PER_1M_TOKEN
+        + (output_tokens / 1_000_000) * OUTPUT_COST_PER_1M_TOKEN
+    )
+
+
 def _user_content(text: str) -> genai.types.Content:
     return genai.types.Content(role="user", parts=[genai.types.Part(text=text)])
 
@@ -147,79 +174,130 @@ class SupportAgent:
             systemInstruction=SYSTEM_PROMPT,
         )
 
-    def chat(self, user_message: str, conversation_history: list[Any]) -> str:
+    def chat(self, user_message: str, conversation_history: list[Any], request_id: str | None = None) -> str:
+        request_token = set_request_id(request_id)
+        total_started_at = time.perf_counter()
+        llm_time_ms = 0.0
+        retrieval_time_ms = 0.0
+        input_tokens_total = 0
+        output_tokens_total = 0
         contents = list(conversation_history)
         next_message = _user_content(user_message)
         rate_limit_retries = 0
 
-        while True:
-            request_contents = contents + [next_message]
-            try:
-                response = self.client.models.generate_content(
-                    model=self.model_name,
-                    contents=request_contents,
-                    config=self.config,
-                )
-            except APIError as exc:
-                if not _is_rate_limit_error(exc) or rate_limit_retries >= MAX_RATE_LIMIT_RETRIES:
-                    raise
-
-                rate_limit_retries += 1
-                delay_seconds = _retry_delay_seconds(exc)
-                print(
-                    "RATE_LIMIT_RETRY "
-                    f"attempt={rate_limit_retries}/{MAX_RATE_LIMIT_RETRIES} "
-                    f"sleep_seconds={delay_seconds}"
-                )
-                time.sleep(delay_seconds)
-                continue
-
-            rate_limit_retries = 0
-            response_content = response.candidates[0].content
-            contents = request_contents + [response_content]
-            parts = response_content.parts or []
-
-            function_call = next(
-                (part.function_call for part in parts if part.function_call),
-                None,
-            )
-            if function_call is None:
-                text = _response_text(parts)
-                conversation_history.clear()
-                conversation_history.extend(contents)
-                return text or "Maaf, saya tidak bisa memberikan jawaban yang aman saat ini."
-
-            tool_name = function_call.name
-            tool_args = dict(function_call.args)
-
-            print(f"FUNCTION_CALL name={tool_name} args={json.dumps(tool_args, ensure_ascii=False)}")
-
-            handler = TOOL_MAP.get(tool_name)
-            if handler is None:
-                tool_result: Any = {"error": f"Unknown tool: {tool_name}"}
-            else:
+        try:
+            while True:
+                request_contents = contents + [next_message]
                 try:
-                    tool_result = handler(**tool_args)
-                except Exception as exc:
-                    tool_result = {"error": str(exc)}
+                    llm_started_at = time.perf_counter()
+                    response = self.client.models.generate_content(
+                        model=self.model_name,
+                        contents=request_contents,
+                        config=self.config,
+                    )
+                    llm_time_ms += (time.perf_counter() - llm_started_at) * 1000
+                except APIError as exc:
+                    llm_time_ms += (time.perf_counter() - llm_started_at) * 1000
+                    if not _is_rate_limit_error(exc) or rate_limit_retries >= MAX_RATE_LIMIT_RETRIES:
+                        raise
 
-            if tool_name == "search_knowledge_base" and not _kb_has_relevant_matches(tool_result):
-                escalate_args = {"reason": "no relevant info found"}
+                    rate_limit_retries += 1
+                    delay_seconds = _retry_delay_seconds(exc)
+                    print(
+                        "RATE_LIMIT_RETRY "
+                        f"request_id={request_id} "
+                        f"attempt={rate_limit_retries}/{MAX_RATE_LIMIT_RETRIES} "
+                        f"sleep_seconds={delay_seconds}"
+                    )
+                    time.sleep(delay_seconds)
+                    continue
+
+                input_tokens, output_tokens = _usage_counts(response)
+                input_tokens_total += input_tokens
+                output_tokens_total += output_tokens
+
+                rate_limit_retries = 0
+                response_content = response.candidates[0].content
+                contents = request_contents + [response_content]
+                parts = response_content.parts or []
+
+                function_call = next(
+                    (part.function_call for part in parts if part.function_call),
+                    None,
+                )
+                if function_call is None:
+                    text = _response_text(parts)
+                    conversation_history.clear()
+                    conversation_history.extend(contents)
+                    return text or "Maaf, saya tidak bisa memberikan jawaban yang aman saat ini."
+
+                tool_name = function_call.name
+                tool_args = dict(function_call.args)
                 print(
                     "FUNCTION_CALL "
-                    f"name=escalate_to_human args={json.dumps(escalate_args, ensure_ascii=False)}"
-                )
-                TOOL_MAP["escalate_to_human"](**escalate_args)
-                conversation_history.clear()
-                conversation_history.extend(contents)
-                return (
-                    "Maaf, saya belum menemukan informasi yang relevan di knowledge base. "
-                    "Saya akan eskalasikan percakapan ini ke agent manusia."
+                    f"request_id={request_id} "
+                    f"name={tool_name} args={json.dumps(tool_args, ensure_ascii=False)}"
                 )
 
-            if tool_name == "escalate_to_human":
-                conversation_history.clear()
-                conversation_history.extend(contents)
-                return "Saya akan eskalasikan percakapan ini ke agent manusia agar bisa ditangani lebih lanjut."
+                handler = TOOL_MAP.get(tool_name)
+                if handler is None:
+                    tool_result: Any = {"error": f"Unknown tool: {tool_name}"}
+                else:
+                    try:
+                        tool_started_at = time.perf_counter()
+                        tool_result = handler(**tool_args)
+                        if tool_name == "search_knowledge_base":
+                            retrieval_time_ms += (time.perf_counter() - tool_started_at) * 1000
+                    except Exception as exc:
+                        if tool_name == "search_knowledge_base":
+                            retrieval_time_ms += (time.perf_counter() - tool_started_at) * 1000
+                        tool_result = {"error": str(exc)}
 
-            next_message = _function_response_content(tool_name, tool_result)
+                if tool_name == "search_knowledge_base" and not _kb_has_relevant_matches(tool_result):
+                    escalate_args = {"reason": "no relevant info found"}
+                    print(
+                        "FUNCTION_CALL "
+                        f"request_id={request_id} "
+                        f"name=escalate_to_human args={json.dumps(escalate_args, ensure_ascii=False)}"
+                    )
+                    TOOL_MAP["escalate_to_human"](**escalate_args)
+                    conversation_history.clear()
+                    conversation_history.extend(contents)
+                    return (
+                        "Maaf, saya belum menemukan informasi yang relevan di knowledge base. "
+                        "Saya akan eskalasikan percakapan ini ke agent manusia."
+                    )
+
+                if tool_name == "escalate_to_human":
+                    conversation_history.clear()
+                    conversation_history.extend(contents)
+                    return "Saya akan eskalasikan percakapan ini ke agent manusia agar bisa ditangani lebih lanjut."
+
+                next_message = _function_response_content(tool_name, tool_result)
+        finally:
+            total_time_ms = (time.perf_counter() - total_started_at) * 1000
+            timestamp = datetime.now(timezone.utc).isoformat()
+            append_jsonl(
+                usage_log_path(),
+                {
+                    "request_id": request_id,
+                    "timestamp": timestamp,
+                    "input_tokens": input_tokens_total,
+                    "output_tokens": output_tokens_total,
+                    "estimated_cost_usd": round(
+                        _estimated_cost_usd(input_tokens_total, output_tokens_total),
+                        10,
+                    ),
+                },
+            )
+            print_and_log_agent_event(
+                {
+                    "event": "latency_breakdown",
+                    "request_id": request_id,
+                    "timestamp": timestamp,
+                    "retrieval_time_ms": round(retrieval_time_ms, 2),
+                    "llm_time_ms": round(llm_time_ms, 2),
+                    "total_time_ms": round(total_time_ms, 2),
+                }
+            )
+            reset_request_id(request_token)

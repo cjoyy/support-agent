@@ -1,0 +1,2 @@
+{"request_id": "test-trace-1", "timestamp": "2026-06-24T02:50:32.972546+00:00", "input_tokens": 641, "output_tokens": 22, "estimated_cost_usd": 7.29e-05}
+{"request_id": "test-trace-2", "timestamp": "2026-06-24T02:50:35.719739+00:00", "input_tokens": 0, "output_tokens": 0, "estimated_cost_usd": 0.0}
