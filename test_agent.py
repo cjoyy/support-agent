@@ -6,7 +6,7 @@ from agent.core import SupportAgent
 def run_scenario(agent: SupportAgent, title: str, message: str) -> None:
     print(f"=== {title} ===")
     history: list[dict[str, object]] = []
-    answer = agent.chat(message, history)
+    answer, _tools_used = agent.chat(message, history)
     print(f"FINAL ANSWER: {answer}")
     print()
 

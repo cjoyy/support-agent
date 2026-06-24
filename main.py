@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from agent.core import SupportAgent
@@ -19,6 +20,7 @@ class ChatResponse(BaseModel):
     response: str
     session_id: str
     request_id: str
+    tools_used: list[str]
 
 
 app = FastAPI(title="Support Agent API")
@@ -43,5 +45,13 @@ def health() -> dict[str, str]:
 def chat(request: ChatRequest) -> ChatResponse:
     request_id = str(uuid4())
     history = session_manager.get_history(request.session_id)
-    response = agent.chat(request.message, history, request_id=request_id)
-    return ChatResponse(response=response, session_id=request.session_id, request_id=request_id)
+    response, tools_used = agent.chat(request.message, history, request_id=request_id)
+    return ChatResponse(
+        response=response,
+        session_id=request.session_id,
+        request_id=request_id,
+        tools_used=tools_used,
+    )
+
+
+app.mount("/", StaticFiles(directory="static", html=True), name="static")

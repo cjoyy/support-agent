@@ -58,9 +58,10 @@ def test_agent_calls_search_knowledge_base_tool(isolated_agent_logs, monkeypatch
 
     agent = SupportAgent(primary_provider=primary, fallback_provider=fallback)
     history: list[object] = []
-    response = agent.chat("bagaimana cara refund?", history, request_id="test-request")
+    response, tools_used = agent.chat("bagaimana cara refund?", history, request_id="test-request")
 
     assert response == "Refunds usually take 5 to 10 business days."
+    assert tools_used == ["search_knowledge_base"]
     assert search_tool.call_args.kwargs == {"query": "bagaimana cara refund?"}
     assert primary.generate.call_count == 2
     fallback.generate.assert_not_called()
@@ -75,9 +76,10 @@ def test_agent_returns_direct_text_without_tool_loop(isolated_agent_logs):
 
     agent = SupportAgent(primary_provider=primary, fallback_provider=fallback)
     history: list[object] = []
-    response = agent.chat("ceritakan resep nasi goreng", history, request_id="test-request")
+    response, tools_used = agent.chat("ceritakan resep nasi goreng", history, request_id="test-request")
 
     assert response == "Maaf, saya hanya bisa membantu topik customer support."
+    assert tools_used == []
     assert primary.generate.call_count == 1
     fallback.generate.assert_not_called()
 
@@ -94,12 +96,15 @@ def test_agent_opens_circuit_and_uses_groq_fallback(isolated_agent_logs):
     )
 
     for index in range(3):
-        assert agent.chat(f"message {index}", [], request_id=f"fallback-{index}") == "fallback response"
+        assert agent.chat(f"message {index}", [], request_id=f"fallback-{index}") == (
+            "fallback response",
+            [],
+        )
 
     assert circuit_breaker.state == CircuitBreaker.OPEN
     assert primary.generate.call_count == 3
 
-    assert agent.chat("message 4", [], request_id="fallback-open") == "fallback response"
+    assert agent.chat("message 4", [], request_id="fallback-open") == ("fallback response", [])
     assert primary.generate.call_count == 3
     assert fallback.generate.call_count == 4
 

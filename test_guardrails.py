@@ -33,7 +33,7 @@ def main() -> None:
 
         for message in scenario["messages"]:
             print(f"USER: {message}")
-            answer = agent.chat(message, sessions.get_history(session_id))
+            answer, _tools_used = agent.chat(message, sessions.get_history(session_id))
             print(f"AGENT: {answer}")
 
         print()

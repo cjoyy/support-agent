@@ -135,7 +135,7 @@ def run_case(agent: SupportAgent, case: dict[str, Any]) -> dict[str, Any]:
     try:
         for message in messages:
             history = session_manager.get_history(session_id)
-            final_response = agent.chat(message, history)
+            final_response, _tools_used = agent.chat(message, history)
     except Exception as exc:
         error = str(exc)
     finally:

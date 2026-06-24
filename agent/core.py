@@ -119,13 +119,19 @@ class SupportAgent:
         )
         return self.fallback_provider.generate(messages, schemas)
 
-    def chat(self, user_message: str, conversation_history: list[Any], request_id: str | None = None) -> str:
+    def chat(
+        self,
+        user_message: str,
+        conversation_history: list[Any],
+        request_id: str | None = None,
+    ) -> tuple[str, list[str]]:
         request_token = set_request_id(request_id)
         total_started_at = time.perf_counter()
         llm_time_ms = 0.0
         retrieval_time_ms = 0.0
         input_tokens_total = 0
         output_tokens_total = 0
+        tools_used: list[str] = []
         messages = list(conversation_history)
         messages.append({"role": "user", "content": user_message})
 
@@ -141,11 +147,15 @@ class SupportAgent:
                     messages.append({"role": "assistant", "content": response.text})
                     conversation_history.clear()
                     conversation_history.extend(messages)
-                    return response.text or "Maaf, saya tidak bisa memberikan jawaban yang aman saat ini."
+                    return (
+                        response.text or "Maaf, saya tidak bisa memberikan jawaban yang aman saat ini.",
+                        tools_used,
+                    )
 
                 messages.append(_assistant_tool_message(response.tool_calls))
 
                 for tool_call in response.tool_calls:
+                    tools_used.append(tool_call.name)
                     print(
                         "FUNCTION_CALL "
                         f"request_id={request_id} "
@@ -173,17 +183,22 @@ class SupportAgent:
                             f"name=escalate_to_human args={json.dumps(escalate_args, ensure_ascii=False)}"
                         )
                         TOOL_MAP["escalate_to_human"](**escalate_args)
+                        tools_used.append("escalate_to_human")
                         conversation_history.clear()
                         conversation_history.extend(messages)
                         return (
                             "Maaf, saya belum menemukan informasi yang relevan di knowledge base. "
-                            "Saya akan eskalasikan percakapan ini ke agent manusia."
+                            "Saya akan eskalasikan percakapan ini ke agent manusia.",
+                            tools_used,
                         )
 
                     if tool_call.name == "escalate_to_human":
                         conversation_history.clear()
                         conversation_history.extend(messages)
-                        return "Saya akan eskalasikan percakapan ini ke agent manusia agar bisa ditangani lebih lanjut."
+                        return (
+                            "Saya akan eskalasikan percakapan ini ke agent manusia agar bisa ditangani lebih lanjut.",
+                            tools_used,
+                        )
 
                     messages.append(_tool_result_message(tool_call, tool_result))
         finally:
