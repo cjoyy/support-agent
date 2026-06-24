@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import sqlite3
 
 import pytest
 
@@ -9,7 +9,7 @@ from tools import handlers
 
 @pytest.fixture(autouse=True)
 def isolated_files(tmp_path, monkeypatch):
-    monkeypatch.setattr(handlers, "tickets_path", lambda: tmp_path / "tickets.json")
+    monkeypatch.setattr(handlers, "database_path", lambda: tmp_path / "sessions.db")
     monkeypatch.setattr(handlers, "agent_log_path", lambda: tmp_path / "agent_log.jsonl")
 
 
@@ -45,8 +45,18 @@ def test_create_ticket_persists_with_auto_increment(monkeypatch, tmp_path):
     assert second["severity"] == "high"
     assert second["category"] == "damaged_item"
 
-    stored = json.loads((tmp_path / "tickets.json").read_text(encoding="utf-8"))
-    assert [ticket["id"] for ticket in stored] == [1, 2]
+    with sqlite3.connect(tmp_path / "sessions.db") as connection:
+        stored = connection.execute(
+            "SELECT id, issue, priority, severity, category FROM tickets ORDER BY id"
+        ).fetchall()
+
+    assert [ticket[0] for ticket in stored] == [1, 2]
+    assert stored[1][1:] == (
+        "Refund belum masuk ke rekening",
+        "medium",
+        "high",
+        "damaged_item",
+    )
 
 
 def test_escalate_to_human_returns_confirmation():

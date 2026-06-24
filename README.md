@@ -43,7 +43,7 @@ Flow aplikasi:
 - Google Gemini (`google-genai`): dipakai karena mendukung function calling, cepat untuk support flow, dan punya free tier yang cocok untuk prototype.
 - ChromaDB: vector database lokal yang praktis untuk RAG kecil/menengah tanpa perlu managed service.
 - VoyageAI embeddings: dipakai untuk embedding knowledge base dengan kualitas retrieval yang baik.
-- In-memory session store: cukup untuk prototype dan local demo; lebih sederhana daripada Redis/database.
+- SQLite (`sessions.db`): menyimpan session history dan ticket lokal agar tetap ada setelah proses/container restart selama file database berada di storage persisten.
 - JSONL structured logging: mudah dianalisis, bisa diproses ulang untuk eval, debugging, dan observability awal.
 - Docker: memudahkan deploy ke Hugging Face Spaces sebagai Docker Space dan menjaga runtime konsisten.
 
@@ -65,19 +65,19 @@ docker build -t support-agent .
 Run container:
 
 ```bash
-docker run -p 8000:8000 --env-file .env support-agent
+docker run -p 7860:7860 --env-file .env -v support-agent-data:/app/storage support-agent
 ```
 
 Health check:
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:7860/health
 ```
 
 Chat request:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/chat \
+curl -X POST http://127.0.0.1:7860/chat \
   -H "Content-Type: application/json" \
   -d '{"session_id":"demo-1","message":"Status order ORD123?"}'
 ```
@@ -85,7 +85,17 @@ curl -X POST http://127.0.0.1:8000/chat \
 Swagger UI:
 
 ```text
-http://127.0.0.1:8000/docs
+http://127.0.0.1:7860/docs
+```
+
+SQLite database:
+
+- Secara default lokal, aplikasi memakai `sessions.db` di root repo.
+- Di Docker, `SUPPORT_AGENT_DB_PATH` diarahkan ke `/app/storage/sessions.db`.
+- Gunakan volume mount yang sama saat restart container agar session dan ticket lama tetap ada:
+
+```bash
+docker run -p 7860:7860 --env-file .env -v support-agent-data:/app/storage support-agent
 ```
 
 ## Hugging Face Spaces Deploy
@@ -100,7 +110,9 @@ Langkah ringkas:
 4. Tambahkan secrets:
    - `GEMINI_API_KEY`
    - `VOYAGE_API_KEY`
-5. Pastikan Space expose port `8000` lewat CMD di `Dockerfile`.
+5. Pastikan Space expose port `7860` lewat CMD di `Dockerfile`.
+
+Persistence note: Hugging Face Spaces disk bawaan bersifat ephemeral, jadi isi file lokal bisa hilang saat Space restart, stop, atau rebuild. Untuk menyimpan `sessions.db` lebih lama dari lifecycle container, attach Storage Bucket/volume dari Settings lalu mount ke `/app/storage`, atau set secret/env `SUPPORT_AGENT_DB_PATH` ke path mount tersebut. Jika tidak memakai storage persisten, session dan ticket akan reset saat Space rebuild. Referensi: https://huggingface.co/docs/hub/spaces-storage
 
 Catatan: `.env`, `.venv`, `logs`, dan `chroma_db` tidak ikut masuk image karena sudah diatur di `.dockerignore`. Jika knowledge base Chroma perlu tersedia di deploy, ada dua pilihan:
 
@@ -142,7 +154,7 @@ Target setelah quota/API key siap: tool-selection accuracy minimal 80%+. Contoh 
 
 ## Limitations & Next Steps
 
-- Session masih in-memory, jadi hilang saat server restart dan belum cocok untuk multi-replica deployment.
+- SQLite lokal belum cocok untuk multi-replica deployment dan butuh volume/storage persisten agar tahan rebuild container.
 - Quota Gemini free tier bisa cepat habis saat eval atau demo intensif.
 - ChromaDB lokal perlu strategi deploy yang lebih jelas untuk Hugging Face Spaces: rebuild index, commit artefak kecil, atau pindah ke vector DB managed.
 - Eval saat ini mengecek tool selection dan refusal keyword, belum menilai kualitas jawaban secara semantik.
@@ -151,7 +163,7 @@ Target setelah quota/API key siap: tool-selection accuracy minimal 80%+. Contoh 
 
 Next steps:
 
-- Tambahkan persistent session store seperti Redis atau SQLite.
+- Tambahkan backend storage production seperti Postgres/Redis jika butuh multi-replica atau query operasional yang lebih kuat.
 - Tambahkan startup job untuk memastikan Chroma collection tersedia.
 - Tambahkan CI yang menjalankan lint, compile, dan eval smoke test.
 - Tambahkan screenshot/GIF Swagger UI setelah Space deploy.

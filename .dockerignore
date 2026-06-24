@@ -11,6 +11,7 @@ __pycache__
 chroma_db
 logs
 tickets.json
+*.db
 .pytest_cache
 .mypy_cache
 .ruff_cache

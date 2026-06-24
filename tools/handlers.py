@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from dotenv import load_dotenv
 from google import genai
 from pydantic import BaseModel, Field, ValidationError
 
+from agent.storage import database_path, project_root
 from data.ingest import query_knowledge_base as ingest_query_knowledge_base
 
 
@@ -45,14 +47,6 @@ class TicketSeverityClassification(BaseModel):
     reasoning: str
 
 
-def project_root() -> Path:
-    return Path(__file__).resolve().parent.parent
-
-
-def tickets_path() -> Path:
-    return project_root() / "tickets.json"
-
-
 def agent_log_path() -> Path:
     return project_root() / "logs" / "agent_log.jsonl"
 
@@ -77,6 +71,24 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as log_file:
         log_file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+
+def initialize_ticket_table() -> None:
+    path = database_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                issue TEXT NOT NULL,
+                priority TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                category TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL
+            )
+            """
+        )
 
 
 def print_and_log_agent_event(record: dict[str, Any]) -> None:
@@ -205,25 +217,34 @@ def create_ticket(issue: str, priority: str) -> dict[str, object]:
             "reasoning": f"classification unavailable: {exc}",
         }
 
-    path = tickets_path()
-    if path.exists():
-        tickets = json.loads(path.read_text(encoding="utf-8"))
-    else:
-        tickets = []
+    created_at = datetime.now(timezone.utc).isoformat()
+    initialize_ticket_table()
+    with sqlite3.connect(database_path()) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO tickets (issue, priority, severity, category, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                validated.issue,
+                validated.priority,
+                classification["severity"],
+                classification["category"],
+                created_at,
+            ),
+        )
+        ticket_id = cursor.lastrowid
 
-    next_id = max((ticket.get("id", 0) for ticket in tickets), default=0) + 1
     ticket = {
-        "id": next_id,
+        "id": ticket_id,
         "issue": validated.issue,
         "priority": validated.priority,
         "severity": classification["severity"],
         "category": classification["category"],
         "classification_reasoning": classification["reasoning"],
         "status": "open",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": created_at,
     }
-    tickets.append(ticket)
-    path.write_text(json.dumps(tickets, indent=2, ensure_ascii=False), encoding="utf-8")
     return ticket
 
 
