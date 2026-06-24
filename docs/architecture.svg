@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="520" viewBox="0 0 1180 520" role="img" aria-labelledby="title desc">
+  <title id="title">Support Agent Architecture</title>
+  <desc id="desc">User flows through frontend or Swagger, FastAPI, agent loop, circuit breaker, LLM providers, tools, RAG, and SQLite persistence.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 2; rx: 10; }
+      .box-accent { fill: #ecfdf5; stroke: #10b981; stroke-width: 2; rx: 10; }
+      .box-warn { fill: #fffbeb; stroke: #f59e0b; stroke-width: 2; rx: 10; }
+      .box-blue { fill: #eff6ff; stroke: #3b82f6; stroke-width: 2; rx: 10; }
+      .title { fill: #0f172a; font: 700 18px Arial, sans-serif; }
+      .text { fill: #334155; font: 400 13px Arial, sans-serif; }
+      .small { fill: #475569; font: 400 12px Arial, sans-serif; }
+      .arrow { stroke: #64748b; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .dash { stroke: #94a3b8; stroke-width: 2; fill: none; stroke-dasharray: 6 6; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#64748b" />
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1180" height="520" />
+
+  <text x="40" y="42" class="title">Customer Support Agent Architecture</text>
+  <text x="40" y="66" class="text">Frontend demo and Swagger call FastAPI, which runs an agent loop with tool-calling, fallback providers, RAG, logs, and SQLite persistence.</text>
+
+  <rect x="40" y="115" width="130" height="80" class="box" />
+  <text x="105" y="148" text-anchor="middle" class="title">User</text>
+  <text x="105" y="173" text-anchor="middle" class="text">Browser or API client</text>
+
+  <rect x="235" y="95" width="160" height="120" class="box-blue" />
+  <text x="315" y="130" text-anchor="middle" class="title">Frontend</text>
+  <text x="315" y="154" text-anchor="middle" class="text">static/index.html</text>
+  <text x="315" y="176" text-anchor="middle" class="small">localStorage session_id</text>
+  <text x="315" y="198" text-anchor="middle" class="small">Swagger UI also works</text>
+
+  <rect x="460" y="95" width="160" height="120" class="box-accent" />
+  <text x="540" y="130" text-anchor="middle" class="title">FastAPI</text>
+  <text x="540" y="154" text-anchor="middle" class="text">/chat and /health</text>
+  <text x="540" y="176" text-anchor="middle" class="small">Pydantic response</text>
+  <text x="540" y="198" text-anchor="middle" class="small">tools_used badges</text>
+
+  <rect x="690" y="95" width="170" height="120" class="box" />
+  <text x="775" y="130" text-anchor="middle" class="title">Agent Loop</text>
+  <text x="775" y="154" text-anchor="middle" class="text">history + prompt</text>
+  <text x="775" y="176" text-anchor="middle" class="small">function calling</text>
+  <text x="775" y="198" text-anchor="middle" class="small">guardrails</text>
+
+  <rect x="925" y="95" width="190" height="120" class="box-warn" />
+  <text x="1020" y="130" text-anchor="middle" class="title">Circuit Breaker</text>
+  <text x="1020" y="154" text-anchor="middle" class="text">Gemini primary</text>
+  <text x="1020" y="176" text-anchor="middle" class="small">Groq fallback</text>
+  <text x="1020" y="198" text-anchor="middle" class="small">quota/error resilience</text>
+
+  <rect x="235" y="315" width="190" height="120" class="box" />
+  <text x="330" y="350" text-anchor="middle" class="title">Tools</text>
+  <text x="330" y="374" text-anchor="middle" class="text">order status</text>
+  <text x="330" y="396" text-anchor="middle" class="small">ticket creation</text>
+  <text x="330" y="418" text-anchor="middle" class="small">human escalation</text>
+
+  <rect x="495" y="315" width="190" height="120" class="box-blue" />
+  <text x="590" y="350" text-anchor="middle" class="title">RAG</text>
+  <text x="590" y="374" text-anchor="middle" class="text">ChromaDB</text>
+  <text x="590" y="396" text-anchor="middle" class="small">Voyage embeddings</text>
+  <text x="590" y="418" text-anchor="middle" class="small">FAQ knowledge base</text>
+
+  <rect x="755" y="315" width="190" height="120" class="box-accent" />
+  <text x="850" y="350" text-anchor="middle" class="title">SQLite</text>
+  <text x="850" y="374" text-anchor="middle" class="text">sessions.db</text>
+  <text x="850" y="396" text-anchor="middle" class="small">session history</text>
+  <text x="850" y="418" text-anchor="middle" class="small">tickets</text>
+
+  <rect x="1000" y="315" width="140" height="120" class="box" />
+  <text x="1070" y="350" text-anchor="middle" class="title">Logs</text>
+  <text x="1070" y="374" text-anchor="middle" class="text">JSONL</text>
+  <text x="1070" y="396" text-anchor="middle" class="small">latency</text>
+  <text x="1070" y="418" text-anchor="middle" class="small">tool calls</text>
+
+  <path d="M170 155 H235" class="arrow" />
+  <path d="M395 155 H460" class="arrow" />
+  <path d="M620 155 H690" class="arrow" />
+  <path d="M860 155 H925" class="arrow" />
+  <path d="M775 215 V260 H330 V315" class="arrow" />
+  <path d="M425 375 H495" class="arrow" />
+  <path d="M775 215 V260 H850 V315" class="dash" />
+  <path d="M860 155 C905 250 1010 250 1070 315" class="dash" />
+  <path d="M235 405 C130 405 105 275 105 195" class="dash" />
+</svg>

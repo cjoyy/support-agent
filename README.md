@@ -10,71 +10,88 @@ pinned: false
 
 # Support Agent
 
-Customer support agent berbasis FastAPI yang memakai Gemini function calling, ChromaDB retrieval, session memory, guardrails, structured tool logging, dan eval golden set.
+Customer support agent berbasis FastAPI yang menggabungkan frontend chat sederhana, Gemini function calling, Groq fallback, ChromaDB RAG, guardrails, structured logging, SQLite persistence, dan automated tests.
 
-## Demo
+- Live demo: https://cjoyy-support-agent.hf.space/
+- Swagger UI: https://cjoyy-support-agent.hf.space/docs
+- Case study: [CASE_STUDY.md](CASE_STUDY.md)
 
-Deployed URL: 
+## Architecture
 
-Swagger UI: 
+Text flow:
 
-Screenshot/GIF Swagger UI:
+```text
+User
+  -> Frontend chat UI / Swagger UI
+  -> FastAPI (/chat)
+  -> Agent Loop (conversation history, guardrails, tool schema)
+  -> Circuit Breaker
+  -> Gemini primary / Groq fallback
+  -> Tools and RAG
+       -> search_knowledge_base -> ChromaDB + Voyage embeddings
+       -> check_order_status -> local fixture
+       -> create_ticket -> SQLite
+       -> escalate_to_human -> structured handoff
+  -> Response with tools_used
+  -> Frontend renders answer + tool badges
+```
 
-## Architecture Diagram
+Visual diagram:
 
-Flow aplikasi:
-
-1. Client mengirim request ke `POST /chat` dengan `session_id` dan `message`.
-2. FastAPI menerima request melalui `main.py`, lalu mengambil conversation history dari `SessionManager`.
-3. `SupportAgent` mengirim message + history ke Gemini dengan tool schema function calling.
-4. Gemini memilih apakah perlu memanggil tool:
-   - `search_knowledge_base` untuk FAQ/support policy.
-   - `check_order_status` untuk order ID spesifik.
-   - `create_ticket` untuk tracking issue formal.
-   - `escalate_to_human` untuk handoff ke agent manusia.
-5. Tool handler mengeksekusi logic lokal. Knowledge base memakai Voyage embedding + ChromaDB.
-6. Setiap tool call dicatat ke stdout dan `logs/agent_log.jsonl`.
-7. Agent mengirim tool result kembali ke Gemini jika perlu, lalu mengembalikan final response ke client.
-8. History disimpan kembali per session ID untuk multi-turn conversation.
+![Architecture diagram](docs/architecture.svg)
 
 ## Tech Stack
 
-- FastAPI: dipilih untuk API sederhana, typed request/response via Pydantic, dan Swagger UI otomatis. Aplikasi agent core tetap ringan tanpa framework agent besar agar flow function calling mudah di-debug.
-- Google Gemini (`google-genai`): dipakai karena mendukung function calling, cepat untuk support flow, dan punya free tier yang cocok untuk prototype.
-- ChromaDB: vector database lokal yang praktis untuk RAG kecil/menengah tanpa perlu managed service.
-- VoyageAI embeddings: dipakai untuk embedding knowledge base dengan kualitas retrieval yang baik.
-- SQLite (`sessions.db`): menyimpan session history dan ticket lokal agar tetap ada setelah proses/container restart selama file database berada di storage persisten.
-- JSONL structured logging: mudah dianalisis, bisa diproses ulang untuk eval, debugging, dan observability awal.
-- Docker: memudahkan deploy ke Hugging Face Spaces sebagai Docker Space dan menjaga runtime konsisten.
+| Component | Choice | Reason |
+| --- | --- | --- |
+| API | FastAPI | Lightweight API, Pydantic models, Swagger UI out of the box. |
+| Frontend | Vanilla HTML/JS + Tailwind CDN | Minimal dependency footprint and enough UI polish for a public demo. |
+| Primary LLM | Gemini `gemini-2.5-flash-lite` | Function calling support and free-tier friendly for a portfolio project. |
+| Fallback LLM | Groq provider | Keeps the app responsive when the primary provider fails or quota is hit. |
+| Agent orchestration | Custom no-framework loop | Full visibility into prompt, tool dispatch, fallback, history, and logs. |
+| RAG store | ChromaDB | Simple local vector store for a small FAQ knowledge base. |
+| Embeddings | VoyageAI | Good retrieval quality for support-policy chunks. |
+| Persistence | SQLite `sessions.db` | Persists session history and tickets without running a separate database service. |
+| Observability | JSONL logs | Easy to inspect latency, token cost, fallback events, and tool calls. |
+| Deployment | Docker + Hugging Face Spaces | Reproducible runtime with a straightforward public demo path. |
+| CI/CD | GitHub Actions | Runs the automated test suite on push and pull request. |
 
-## Run Lokal
+## Features
 
-Siapkan `.env`:
+- RAG over local support policy documents using ChromaDB and Voyage embeddings.
+- Tool-calling for knowledge search, order status, ticket creation, and human escalation.
+- Guardrails for out-of-scope requests and uncertain knowledge-base answers.
+- Multi-provider fallback with a circuit breaker around the primary LLM.
+- Observability through structured JSONL tool, latency, fallback, and usage logs.
+- Persistent storage for sessions and tickets via SQLite.
+- CI workflow for automated tests.
+- Frontend demo at `/` with chat bubbles, persistent browser session ID, and tool badges.
+
+## Quick Start
+
+Create `.env`:
 
 ```env
 GEMINI_API_KEY=...
 VOYAGE_API_KEY=...
+GROQ_API_KEY=...
 ```
 
-Build image:
+Build and run with persistent Docker storage:
 
 ```bash
 docker build -t support-agent .
-```
-
-Run container:
-
-```bash
 docker run -p 7860:7860 --env-file .env -v support-agent-data:/app/storage support-agent
 ```
 
-Health check:
+Open:
 
-```bash
-curl http://127.0.0.1:7860/health
+```text
+http://127.0.0.1:7860/
+http://127.0.0.1:7860/docs
 ```
 
-Chat request:
+API smoke test:
 
 ```bash
 curl -X POST http://127.0.0.1:7860/chat \
@@ -82,90 +99,73 @@ curl -X POST http://127.0.0.1:7860/chat \
   -d '{"session_id":"demo-1","message":"Status order ORD123?"}'
 ```
 
-Swagger UI:
-
-```text
-http://127.0.0.1:7860/docs
-```
-
-SQLite database:
-
-- Secara default lokal, aplikasi memakai `sessions.db` di root repo.
-- Di Docker, `SUPPORT_AGENT_DB_PATH` diarahkan ke `/app/storage/sessions.db`.
-- Gunakan volume mount yang sama saat restart container agar session dan ticket lama tetap ada:
+Run tests:
 
 ```bash
-docker run -p 7860:7860 --env-file .env -v support-agent-data:/app/storage support-agent
+python -m pytest tests -v
 ```
 
-## Hugging Face Spaces Deploy
+## Eval & Metrics Summary
 
-Rencana deploy: Hugging Face Spaces dengan SDK `Docker`.
+The golden set in `eval/golden_set.json` contains 20 cases:
 
-Langkah ringkas:
+- FAQ: 5 cases.
+- Order status: 4 cases.
+- Ticket creation: 3 cases.
+- Escalation: 3 cases.
+- Out-of-scope guardrail: 3 cases.
+- Multi-turn edge case: 2 cases.
 
-1. Buat Space baru di Hugging Face.
-2. Pilih SDK `Docker`.
-3. Push repo ini ke Space.
-4. Tambahkan secrets:
-   - `GEMINI_API_KEY`
-   - `VOYAGE_API_KEY`
-5. Pastikan Space expose port `7860` lewat CMD di `Dockerfile`.
+Current recorded metrics:
 
-Persistence note: Hugging Face Spaces disk bawaan bersifat ephemeral, jadi isi file lokal bisa hilang saat Space restart, stop, atau rebuild. Untuk menyimpan `sessions.db` lebih lama dari lifecycle container, attach Storage Bucket/volume dari Settings lalu mount ke `/app/storage`, atau set secret/env `SUPPORT_AGENT_DB_PATH` ke path mount tersebut. Jika tidak memakai storage persisten, session dan ticket akan reset saat Space rebuild. Referensi: https://huggingface.co/docs/hub/spaces-storage
+| Metric | Value | Source |
+| --- | --- | --- |
+| Tool-call accuracy | `0/1` in the last recorded run, blocked by Gemini `429 quota exceeded` before tool call | `eval/results.json` |
+| Golden set size | 20 cases | `eval/golden_set.json` |
+| Avg latency | `6.59s` across two recorded traces | `logs/agent_log.jsonl` |
+| Cost per conversation | `0.0000729 USD` for the recorded successful Gemini trace | `logs/usage_log.jsonl` |
+| Automated tests | 13 passing tests | `python -m pytest tests -v` |
+| Line coverage | Not configured yet | Test suite only |
 
-Catatan: `.env`, `.venv`, `logs`, dan `chroma_db` tidak ikut masuk image karena sudah diatur di `.dockerignore`. Jika knowledge base Chroma perlu tersedia di deploy, ada dua pilihan:
-
-1. Build ulang index saat startup/deploy.
-2. Commit artefak database yang sudah diperkecil, jika ukurannya masih masuk akal.
-
-## Eval Results Summary
-
-Eval dataset ada di `eval/golden_set.json` dengan 20 test case:
-
-- FAQ: 5 case.
-- Order status: 4 case.
-- Ticket creation: 3 case.
-- Escalation: 3 case.
-- Out-of-scope guardrail: 3 case.
-- Multi-turn edge case: 2 case.
-
-Cara menjalankan eval:
+Run eval:
 
 ```bash
 python eval/run_eval.py
 ```
 
-Smoke test:
+Smoke eval:
 
 ```bash
 python eval/run_eval.py --limit 3
 ```
 
-Current result: eval belum menghasilkan accuracy final karena run terakhir terblokir quota Gemini free tier sebelum tool call pertama. File `eval/results.json` menyimpan hasil parsial dengan error `429 quota exceeded`.
+## Persistence Notes
 
-Target setelah quota/API key siap: tool-selection accuracy minimal 80%+. Contoh kasus yang ditangani oleh golden set:
+By default, local development writes SQLite data to `sessions.db` in the repo root. Docker sets `SUPPORT_AGENT_DB_PATH=/app/storage/sessions.db`, so use the same volume mount across restarts:
 
-- Pertanyaan refund umum harus memanggil `search_knowledge_base`.
-- `Status order ORD123?` harus memanggil `check_order_status`.
-- Permintaan “buatkan tiket” harus memanggil `create_ticket`.
-- Permintaan bicara dengan manusia harus memanggil `escalate_to_human`.
-- Pertanyaan di luar customer support harus ditolak sopan tanpa tool call.
+```bash
+docker run -p 7860:7860 --env-file .env -v support-agent-data:/app/storage support-agent
+```
 
-## Limitations & Next Steps
+On Hugging Face Spaces, default container disk can reset on restart or rebuild. For durable session and ticket storage, enable persistent storage in Space settings and point `SUPPORT_AGENT_DB_PATH` at the mounted path. Without persistent storage, SQLite data is best treated as demo-only state.
 
-- SQLite lokal belum cocok untuk multi-replica deployment dan butuh volume/storage persisten agar tahan rebuild container.
-- Quota Gemini free tier bisa cepat habis saat eval atau demo intensif.
-- ChromaDB lokal perlu strategi deploy yang lebih jelas untuk Hugging Face Spaces: rebuild index, commit artefak kecil, atau pindah ke vector DB managed.
-- Eval saat ini mengecek tool selection dan refusal keyword, belum menilai kualitas jawaban secara semantik.
-- Logging sudah JSONL lokal, tetapi belum ada dashboard/trace viewer.
-- Error handling API masih sederhana; production API perlu response code yang lebih rapi untuk quota, missing env, dan dependency failure.
+## Known Limitations
 
-Next steps:
+- Gemini free-tier quota can block eval or demos. The fallback provider helps at runtime, but the eval still needs an offline/mock mode to be stable in CI.
+- SQLite is good for a single demo container, but not for high write concurrency or multi-replica production deployments.
+- ChromaDB local storage is convenient, but production RAG should use a clearer managed storage or rebuild strategy.
+- Eval currently checks tool selection and simple refusal behavior, not semantic answer quality.
+- Observability is JSONL-based and useful for debugging, but it is not a full tracing stack.
+- API error handling is still simple for missing secrets, provider quota, and dependency failures.
+- Live demo availability depends on the Hugging Face Space rebuild finishing successfully after changes are pushed.
 
-- Tambahkan backend storage production seperti Postgres/Redis jika butuh multi-replica atau query operasional yang lebih kuat.
-- Tambahkan startup job untuk memastikan Chroma collection tersedia.
-- Tambahkan CI yang menjalankan lint, compile, dan eval smoke test.
-- Tambahkan screenshot/GIF Swagger UI setelah Space deploy.
-- Tambahkan streaming response untuk UX chat yang lebih nyaman.
-- Tambahkan offline/mock eval mode agar tool-selection bisa dites tanpa menghabiskan quota LLM.
+## Design Notes
+
+See [CASE_STUDY.md](CASE_STUDY.md) for the design decisions, trade-offs, production-scale plan, metrics, and reflection.
+
+## Final Checklist
+
+- Automated tests pass locally: `13 passed` with `python -m pytest tests -v`.
+- GitHub Actions should run the same `pytest tests/ -v` workflow after push.
+- Live demo should be tested from a browser or another device after the Space rebuild completes.
+- README and case study are complete and ready for proof-read before final submission.
