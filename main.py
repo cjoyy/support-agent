@@ -24,8 +24,15 @@ class ChatResponse(BaseModel):
 
 
 app = FastAPI(title="Support Agent API")
-agent = SupportAgent()
+agent: SupportAgent | None = None
 session_manager = SessionManager()
+
+
+def get_agent() -> SupportAgent:
+    global agent
+    if agent is None:
+        agent = SupportAgent()
+    return agent
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,7 +52,7 @@ def health() -> dict[str, str]:
 def chat(request: ChatRequest) -> ChatResponse:
     request_id = str(uuid4())
     history = session_manager.get_history(request.session_id)
-    response, tools_used = agent.chat(request.message, history, request_id=request_id)
+    response, tools_used = get_agent().chat(request.message, history, request_id=request_id)
     return ChatResponse(
         response=response,
         session_id=request.session_id,

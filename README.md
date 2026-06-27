@@ -120,12 +120,18 @@ Current recorded metrics:
 
 | Metric | Value | Source |
 | --- | --- | --- |
-| Tool-call accuracy | `0/1` in the last recorded run, blocked by Gemini `429 quota exceeded` before tool call | `eval/results.json` |
-| Golden set size | 20 cases | `eval/golden_set.json` |
-| Avg latency | `6.59s` across two recorded traces | `logs/agent_log.jsonl` |
-| Cost per conversation | `0.0000729 USD` for the recorded successful Gemini trace | `logs/usage_log.jsonl` |
-| Automated tests | 13 passing tests | `python -m pytest tests -v` |
-| Line coverage | Not configured yet | Test suite only |
+| Golden set size | 20 cases | `eval/golden_set.json:1-128` |
+| Tool-call accuracy | `0/1` in the last recorded run, blocked by Gemini `429 quota exceeded` before tool call | `eval/results.json:6` |
+| Per-tool accuracy | Computed per tool (`search_knowledge_base`, `check_order_status`, `create_ticket`, `escalate_to_human`, `null` for out-of-scope) | `eval/run_eval.py:50-73` |
+| Avg latency | `6.59s` across two recorded traces | `logs/agent_log.jsonl:19-20` |
+| P95 latency | Computed from eval case latencies | `eval/run_eval.py:27-31` |
+| P95 total latency | Computed from latency_breakdown events | `eval/usage_summary.py:85-87` |
+| Cost per conversation | `0.0000729 USD` for the recorded successful Gemini trace | `logs/usage_log.jsonl:1` |
+| Tool-call success rate | Computed per tool from JSONL logs | `eval/usage_summary.py:97-108` |
+| Distinct tools | 4 (`search_knowledge_base`, `check_order_status`, `create_ticket`, `escalate_to_human`) | `tools/handlers.py:262-267` |
+| Automated tests | 13 passing tests | `tests/` — `test_agent.py` (3), `test_api.py` (2), `test_session.py` (3), `test_tools.py` (5) |
+| Line coverage | Measured via `pytest-cov` in CI | `.github/workflows/test.yml:31` |
+| CI pipeline | GitHub Actions on push/PR to `main` | `.github/workflows/test.yml:1-30` |
 
 Run eval:
 

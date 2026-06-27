@@ -4,7 +4,16 @@
     "passed": 0,
     "failed": 1,
     "accuracy_percent": 0.0,
-    "avg_latency_ms": 498.15
+    "avg_latency_ms": 498.15,
+    "p95_latency_ms": 498.15
+  },
+  "per_tool_accuracy": {
+    "search_knowledge_base": {
+      "accuracy_percent": 0.0,
+      "passed": 0,
+      "failed": 1,
+      "total": 1
+    }
   },
   "results": [
     {

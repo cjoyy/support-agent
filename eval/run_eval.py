@@ -4,6 +4,7 @@ import json
 import sys
 import time
 from argparse import ArgumentParser
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
@@ -171,6 +172,37 @@ def is_quota_error(result: dict[str, Any]) -> bool:
     return any(marker.lower() in error or marker.lower() in reason for marker in QUOTA_ERROR_MARKERS)
 
 
+def compute_p95(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    sorted_values = sorted(values)
+    idx = min(int(len(sorted_values) * 0.95), len(sorted_values) - 1)
+    return round(sorted_values[idx], 2)
+
+
+def build_per_tool_accuracy(results: list[dict[str, Any]]) -> dict[str, dict[str, int | float]]:
+    per_tool: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "passed": 0, "failed": 0})
+    for result in results:
+        tool = str(result.get("expected_tool") or "null")
+        per_tool[tool]["total"] += 1
+        if result["passed"]:
+            per_tool[tool]["passed"] += 1
+        else:
+            per_tool[tool]["failed"] += 1
+
+    out: dict[str, dict[str, int | float]] = {}
+    for tool, counts in per_tool.items():
+        total = counts["total"]
+        passed = counts["passed"]
+        out[tool] = {
+            "accuracy_percent": round((passed / total) * 100, 2) if total else 0.0,
+            "passed": passed,
+            "failed": counts["failed"],
+            "total": total,
+        }
+    return out
+
+
 def build_output(results: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(results)
     passed = sum(1 for result in results if result["passed"])
@@ -180,6 +212,8 @@ def build_output(results: list[dict[str, Any]]) -> dict[str, Any]:
         sum(result["latency_ms"] for result in results) / total,
         2,
     ) if total else 0.0
+    latencies = [result["latency_ms"] for result in results]
+    p95_latency_ms = compute_p95(latencies)
 
     return {
         "summary": {
@@ -188,7 +222,9 @@ def build_output(results: list[dict[str, Any]]) -> dict[str, Any]:
             "failed": len(failed_cases),
             "accuracy_percent": accuracy,
             "avg_latency_ms": avg_latency_ms,
+            "p95_latency_ms": p95_latency_ms,
         },
+        "per_tool_accuracy": build_per_tool_accuracy(results),
         "results": results,
     }
 
@@ -241,6 +277,17 @@ def main() -> None:
         flush=True,
     )
     print(f"Average latency: {summary['avg_latency_ms']} ms", flush=True)
+    print(f"P95 latency: {summary['p95_latency_ms']} ms", flush=True)
+
+    per_tool = output.get("per_tool_accuracy", {})
+    if per_tool:
+        print("Per-tool accuracy:", flush=True)
+        for tool_name, tool_stats in sorted(per_tool.items()):
+            print(
+                f"  {tool_name}: {tool_stats['accuracy_percent']}% "
+                f"({tool_stats['passed']}/{tool_stats['total']})",
+                flush=True,
+            )
 
     if failed_cases:
         print("Failed cases:", flush=True)
