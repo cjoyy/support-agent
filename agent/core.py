@@ -4,6 +4,7 @@ import json
 import time
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from dotenv import load_dotenv
 
@@ -29,7 +30,7 @@ SYSTEM_PROMPT = (
     "You are a customer support agent. "
     "You may only answer customer support questions related to orders, refunds, shipping, accounts, billing, "
     "and service policies. If the user asks about anything outside customer support, politely refuse and redirect "
-    "them back to support topics you can help with. "
+    "them back to support topics you can help with. Do not call any tools for out-of-scope questions. "
     "For general support questions, call search_knowledge_base first before answering. "
     "If search_knowledge_base returns empty or irrelevant matches, do not invent an answer; immediately call "
     "escalate_to_human with reason 'no relevant info found'. "
@@ -56,17 +57,21 @@ def _estimated_cost_usd(input_tokens: int, output_tokens: int) -> float:
     )
 
 
+def _call_id() -> str:
+    return f"call_{uuid4().hex[:12]}"
+
+
 def _assistant_tool_message(tool_calls: list[ToolCall]) -> dict[str, Any]:
     return {
         "role": "assistant",
         "content": "",
         "tool_calls": [
             {
-                "id": tool_call.id or f"call_{index}",
+                "id": tool_call.id or _call_id(),
                 "name": tool_call.name,
                 "args": tool_call.args,
             }
-            for index, tool_call in enumerate(tool_calls)
+            for tool_call in tool_calls
         ],
     }
 
@@ -74,7 +79,7 @@ def _assistant_tool_message(tool_calls: list[ToolCall]) -> dict[str, Any]:
 def _tool_result_message(tool_call: ToolCall, tool_result: Any) -> dict[str, Any]:
     return {
         "role": "tool",
-        "tool_call_id": tool_call.id or "call_0",
+        "tool_call_id": tool_call.id or _call_id(),
         "name": tool_call.name,
         "content": tool_result,
     }
@@ -99,25 +104,58 @@ class SupportAgent:
         self.circuit_breaker = circuit_breaker or CircuitBreaker()
 
     def _generate(self, messages: list[dict[str, Any]], request_id: str | None) -> ProviderResponse:
-        try:
-            return self.circuit_breaker.call(self.primary_provider.generate, messages, schemas)
-        except CircuitOpenError as exc:
-            reason = str(exc)
-        except Exception as exc:
-            reason = f"{type(exc).__name__}: {exc}"
+        last_exception: Exception | None = None
 
-        print_and_log_agent_event(
-            {
-                "event": "fallback_used",
+        for attempt in range(2):
+            try:
+                return self.circuit_breaker.call(self.primary_provider.generate, messages, schemas)
+            except CircuitOpenError as exc:
+                last_exception = exc
+                break
+            except Exception as exc:
+                last_exception = exc
+                if attempt == 0:
+                    print_and_log_agent_event({
+                        "event": "retry_primary",
+                        "request_id": request_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "reason": f"retry attempt=1 {type(exc).__name__}: {exc}",
+                    })
+                    continue
+
+        fallbacks = [(self.fallback_provider, "fallback")]
+
+        for fb_provider, fb_name in fallbacks:
+            for attempt in range(2):
+                try:
+                    response = fb_provider.generate(messages, schemas)
+                    print_and_log_agent_event({
+                        "event": "fallback_used",
+                        "request_id": request_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "fallback_provider": fb_provider.name,
+                    })
+                    return response
+                except Exception as exc:
+                    last_exception = exc
+                    if attempt == 0:
+                        print_and_log_agent_event({
+                            "event": f"retry_{fb_name}",
+                            "request_id": request_id,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "reason": f"retry attempt=1 {type(exc).__name__}: {exc}",
+                        })
+                        continue
+
+            print_and_log_agent_event({
+                "event": f"{fb_name}_failed",
                 "request_id": request_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "primary_provider": self.primary_provider.name,
-                "fallback_provider": self.fallback_provider.name,
-                "reason": reason,
-                "circuit_state": self.circuit_breaker.state,
-            }
-        )
-        return self.fallback_provider.generate(messages, schemas)
+                "provider": fb_provider.name,
+                "reason": f"{type(last_exception).__name__}: {last_exception}",
+            })
+
+        raise RuntimeError(f"all providers failed: {last_exception}")
 
     def chat(
         self,

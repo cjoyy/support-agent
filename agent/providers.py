@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
+
 from dotenv import load_dotenv
 from google import genai
 
@@ -182,24 +184,24 @@ class GeminiProvider(LLMProvider):
         )
 
 
-class GroqProvider(LLMProvider):
-    name = "groq"
+class _OpenAICompatProvider(LLMProvider):
+    """Base for OpenAI-compatible providers (Groq, Cerebras, etc.)."""
 
-    def __init__(self, api_key: str | None = None, model: str = GROQ_MODEL, system_prompt: str | None = None) -> None:
-        load_dotenv()
-        self.api_key = api_key or os.getenv("GROQ_API_KEY")
-        self.model = model
-        self.system_prompt = system_prompt
-        self.client: Any | None = None
+    name: str = ""
+    api_key_env: str = ""
+    api_base: str = ""
+    model: str = ""
+    system_prompt: str | None = None
+    _client: Any | None = None
 
-    def _client(self) -> Any:
+    def _ensure_client(self) -> Any:
         if not self.api_key:
-            raise RuntimeError("GROQ_API_KEY is not set")
-        if self.client is None:
-            from groq import Groq
+            raise RuntimeError(f"{self.api_key_env} is not set")
+        if self._client is None:
+            from openai import OpenAI
 
-            self.client = Groq(api_key=self.api_key)
-        return self.client
+            self._client = OpenAI(api_key=self.api_key, base_url=self.api_base)
+        return self._client
 
     def _messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         converted: list[dict[str, Any]] = []
@@ -239,7 +241,7 @@ class GroqProvider(LLMProvider):
         return converted
 
     def generate(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ProviderResponse:
-        response = self._client().chat.completions.create(
+        response = self._ensure_client().chat.completions.create(
             model=self.model,
             messages=self._messages(messages),
             tools=to_openai_tools(tools),
@@ -262,3 +264,18 @@ class GroqProvider(LLMProvider):
             input_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
             output_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
         )
+
+
+class GroqProvider(_OpenAICompatProvider):
+    name = "groq"
+    api_key_env = "GROQ_API_KEY"
+    api_base = "https://api.groq.com/openai/v1"
+
+    def __init__(self, api_key: str | None = None, model: str = GROQ_MODEL, system_prompt: str | None = None) -> None:
+        load_dotenv()
+        self.api_key = api_key or os.getenv("GROQ_API_KEY")
+        self.model = model
+        self.system_prompt = system_prompt
+
+
+
